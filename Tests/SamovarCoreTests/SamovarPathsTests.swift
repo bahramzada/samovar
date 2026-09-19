@@ -12,11 +12,21 @@ import Testing
     }
 
     @Test func engineEnvironmentPointsAtPrefix() throws {
-        let manifest = EngineManifest(id: "x", displayName: "X", installedAt: .now)
-        let engine = WineEngine(id: "x", directory: URL(filePath: "/e/x"), manifest: manifest)
+        let engine = WineEngine(directory: URL(filePath: "/e/x"),
+                                manifest: EngineManifest(descriptor: EngineCatalog.cx24, installedAt: .now))
         let env = engine.environment(prefix: URL(filePath: "/p/steam"), extra: ["WINEDEBUG": "+seh"])
         #expect(env["WINEPREFIX"] == "/p/steam")
         #expect(env["WINEDEBUG"] == "+seh")
-        #expect(env["PATH"]?.hasPrefix("/e/x/wine/bin:") == true)
+        #expect(env["WINEMSYNC"] == "1")
+        #expect(env["PATH"]?.hasPrefix("/e/x/Frameworks/wswine.bundle/bin:") == true)
+        #expect(env["DYLD_FALLBACK_LIBRARY_PATH"] == "/e/x/Frameworks:/usr/lib")
+    }
+
+    @Test func rendererArgumentsRoundTrip() {
+        #expect(Renderer(argument: "d3dmetal") == .d3dmetal(nil))
+        #expect(Renderer(argument: "d3dmetal-4.0-beta-2") == .d3dmetal("d3dmetal-4.0-beta-2"))
+        #expect(Renderer(argument: "DXMT") == .dxmt)
+        #expect(Renderer(argument: "vulkan") == nil)
+        #expect(D3DMetalImporter.version(fromVolumeName: "Evaluation environment for Windows games 4.0 beta 2") == "4.0-beta-2")
     }
 }

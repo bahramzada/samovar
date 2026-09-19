@@ -23,8 +23,7 @@ public struct EngineManager: Sendable {
     private static let manifestName = "manifest.json"
 
     public func installed() -> [WineEngine] {
-        let fm = FileManager.default
-        guard let ids = try? fm.contentsOfDirectory(atPath: paths.engines.path) else { return [] }
+        guard let ids = try? FileManager.default.contentsOfDirectory(atPath: paths.engines.path) else { return [] }
         return ids.filter { !$0.hasPrefix(".") }.sorted().compactMap { try? engine($0) }
     }
 
@@ -33,61 +32,54 @@ public struct EngineManager: Sendable {
         let manifestURL = dir.appending(path: Self.manifestName)
         guard FileManager.default.fileExists(atPath: manifestURL.path) else { throw EngineError.notInstalled(id) }
         let manifest = try JSONDecoder.samovar.decode(EngineManifest.self, from: Data(contentsOf: manifestURL))
-        return WineEngine(id: id, directory: dir, manifest: manifest)
+        return WineEngine(directory: dir, manifest: manifest)
     }
 
-    /// Downloads (or takes `localArchive`), verifies and unpacks an engine.
+    /// Downloads, verifies and unpacks every component of an engine.
+    ///
+    /// `localArchives` maps a component's archive file name to an already-downloaded copy;
+    /// those are still checksum-verified.
     @discardableResult
     public func install(
         _ descriptor: EngineDescriptor,
-        localArchive: URL? = nil,
+        localArchives: [String: URL] = [:],
         progress: (@Sendable (String, Double?) -> Void)? = nil
     ) async throws -> WineEngine {
         let fm = FileManager.default
         try paths.ensureDirectories()
         if (try? engine(descriptor.id)) != nil { throw EngineError.alreadyInstalled(descriptor.id) }
 
-        let archive: URL
-        if let localArchive {
-            progress?("Verifying \(localArchive.lastPathComponent)", nil)
-            let actual = try SHA256Hasher.hash(of: localArchive)
-            guard actual == descriptor.sha256 else {
-                throw DownloadError.checksumMismatch(file: localArchive, expected: descriptor.sha256, actual: actual)
-            }
-            archive = localArchive
-        } else {
-            archive = paths.downloads.appending(path: descriptor.url.lastPathComponent)
-            progress?("Downloading \(descriptor.displayName)", 0)
-            try await Downloader.fetch(descriptor.url, to: archive, sha256: descriptor.sha256) {
-                progress?("Downloading \(descriptor.displayName)", $0)
-            }
-        }
-
         let staging = paths.engines.appending(path: ".staging-\(UUID().uuidString)", directoryHint: .isDirectory)
         defer { try? fm.removeItem(at: staging) }
-        let unpacked = staging.appending(path: "unpacked", directoryHint: .isDirectory)
-        try fm.createDirectory(at: unpacked, withIntermediateDirectories: true)
-
-        progress?("Extracting", nil)
-        try await ProcessRunner.run(URL(filePath: "/usr/bin/tar"), ["-xf", archive.path, "-C", unpacked.path])
-
-        let wineRoot = unpacked.appending(path: descriptor.archiveSubpath, directoryHint: .isDirectory)
-        guard fm.fileExists(atPath: wineRoot.appending(path: "bin/wine64").path) else {
-            throw EngineError.invalidArchive("bin/wine64 not found under \(descriptor.archiveSubpath)")
-        }
-
         let assembled = staging.appending(path: descriptor.id, directoryHint: .isDirectory)
         try fm.createDirectory(at: assembled, withIntermediateDirectories: true)
-        try fm.moveItem(at: wineRoot, to: assembled.appending(path: "wine", directoryHint: .isDirectory))
-        let manifest = EngineManifest(
-            id: descriptor.id,
-            displayName: descriptor.displayName,
-            baseEngine: nil,
-            d3dmetal: descriptor.bundledD3DMetal,
-            source: descriptor.url,
-            sha256: descriptor.sha256,
-            installedAt: .now
-        )
+
+        for (index, component) in descriptor.components.enumerated() {
+            let name = component.url.lastPathComponent
+            let step = "[\(index + 1)/\(descriptor.components.count)] \(name)"
+            let archive = try await fetch(component, local: localArchives[name], step: step, progress: progress)
+
+            progress?("\(step): extracting", nil)
+            let unpacked = staging.appending(path: "unpacked-\(index)", directoryHint: .isDirectory)
+            try fm.createDirectory(at: unpacked, withIntermediateDirectories: true)
+            try await ProcessRunner.run(URL(filePath: "/usr/bin/tar"), ["-xf", archive.path, "-C", unpacked.path])
+
+            let source = unpacked.appending(path: component.archiveSubpath, directoryHint: .isDirectory)
+            guard fm.fileExists(atPath: source.path) else {
+                throw EngineError.invalidArchive("\(component.archiveSubpath) not found in \(name)")
+            }
+            let destination = assembled.appending(path: component.destination, directoryHint: .isDirectory)
+            try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
+            try fm.moveItem(at: source, to: destination)
+            try? fm.removeItem(at: unpacked)
+        }
+
+        let manifest = EngineManifest(descriptor: descriptor, installedAt: .now)
+        let probe = WineEngine(directory: assembled, manifest: manifest)
+        guard fm.isExecutableFile(atPath: probe.wine.path), fm.isExecutableFile(atPath: probe.wineserver.path) else {
+            throw EngineError.invalidArchive("wine binaries missing under \(descriptor.winePath)")
+        }
         try JSONEncoder.samovar.encode(manifest).write(to: assembled.appending(path: Self.manifestName))
         try fm.moveItem(at: assembled, to: paths.engine(descriptor.id))
 
@@ -101,9 +93,26 @@ public struct EngineManager: Sendable {
         try FileManager.default.removeItem(at: dir)
     }
 
-    /// Writes a new manifest for an engine assembled elsewhere (used by variants).
-    func writeManifest(_ manifest: EngineManifest, in directory: URL) throws {
-        try JSONEncoder.samovar.encode(manifest).write(to: directory.appending(path: Self.manifestName))
+    private func fetch(
+        _ component: EngineComponent,
+        local: URL?,
+        step: String,
+        progress: (@Sendable (String, Double?) -> Void)?
+    ) async throws -> URL {
+        if let local {
+            progress?("\(step): verifying", nil)
+            let actual = try SHA256Hasher.hash(of: local)
+            guard actual == component.sha256 else {
+                throw DownloadError.checksumMismatch(file: local, expected: component.sha256, actual: actual)
+            }
+            return local
+        }
+        let archive = paths.downloads.appending(path: component.url.lastPathComponent)
+        progress?("\(step): downloading", 0)
+        try await Downloader.fetch(component.url, to: archive, sha256: component.sha256) {
+            progress?("\(step): downloading", $0)
+        }
+        return archive
     }
 }
 

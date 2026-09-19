@@ -7,8 +7,34 @@ struct Samovar: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "samovar",
         abstract: "Play Windows Steam games on macOS.",
-        subcommands: [EngineCommand.self]
+        subcommands: [EngineCommand.self, D3DMetalCommand.self]
     )
+}
+
+struct D3DMetalCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "d3dmetal",
+        abstract: "Import D3DMetal from Apple's 'Evaluation environment for Windows games' DMG.",
+        subcommands: [Import.self, List.self]
+    )
+
+    struct Import: AsyncParsableCommand {
+        @Argument(help: "Path to the .dmg file.")
+        var dmg: String
+
+        func run() async throws {
+            let backend = try await D3DMetalImporter(paths: SamovarPaths()).importDMG(URL(filePath: dmg))
+            print("Imported \(backend.id) (use renderer `\(backend.id)`)")
+        }
+    }
+
+    struct List: AsyncParsableCommand {
+        func run() async throws {
+            let installed = D3DMetalImporter(paths: SamovarPaths()).installed()
+            if installed.isEmpty { print("(none imported)") }
+            for backend in installed { print("  \(backend.id)") }
+        }
+    }
 }
 
 struct EngineCommand: AsyncParsableCommand {
@@ -25,13 +51,14 @@ struct EngineCommand: AsyncParsableCommand {
             let installed = EngineManager(paths: SamovarPaths()).installed()
             print("Installed:")
             if installed.isEmpty { print("  (none)") }
+            let imported = D3DMetalImporter(paths: SamovarPaths()).installed()
             for engine in installed {
-                let d3d = engine.manifest.d3dmetal.map { "  D3DMetal \($0)" } ?? ""
-                print("  \(engine.id)  \(engine.manifest.displayName)\(d3d)")
+                let renderers = engine.availableRenderers(importedD3DMetal: imported).map(\.description)
+                print("  \(engine.id)  \(engine.displayName)  [\(renderers.joined(separator: ", "))]")
             }
             print("Available:")
             for descriptor in EngineCatalog.all {
-                print("  \(descriptor.id)  \(descriptor.displayName)")
+                print("  \(descriptor.id)  \(descriptor.displayName) (wine-\(descriptor.wineVersion))")
             }
         }
     }
@@ -42,17 +69,19 @@ struct EngineCommand: AsyncParsableCommand {
         @Argument(help: "Engine id (see `engine list`).")
         var id: String = EngineCatalog.default.id
 
-        @Option(help: "Use an already-downloaded archive instead of downloading.")
-        var archive: String?
+        @Option(name: .customLong("archive"), help: "Use an already-downloaded component archive (repeatable).")
+        var archives: [String] = []
 
         func run() async throws {
             guard let descriptor = EngineCatalog.descriptor(id: id) else {
                 throw ValidationError("Unknown engine '\(id)'")
             }
+            let local = Dictionary(archives.map { (URL(filePath: $0).lastPathComponent, URL(filePath: $0)) },
+                                   uniquingKeysWith: { _, new in new })
             let reporter = ProgressReporter()
             let engine = try await EngineManager(paths: SamovarPaths()).install(
                 descriptor,
-                localArchive: archive.map { URL(filePath: $0) },
+                localArchives: local,
                 progress: reporter.report
             )
             print("Installed \(engine.id) at \(engine.directory.path)")
