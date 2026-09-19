@@ -1,0 +1,58 @@
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# --- Xcode ---
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.xcresult
+
+# --- Swift Package Manager ---
+.build/
+.swiftpm/
+Packages/
+Package.resolved.bak
+
+# --- Apple Game Porting Toolkit (license: not redistributable, never commit) ---
+*.dmg
+Evaluation_environment_for_Windows_games*/
+D3DMetal.framework/
+libd3dshared.dylib
+
+# --- Third-party runtime payloads (downloaded at runtime, never commit) ---
+vendor/
+Engines/
+Backends/
+Prefixes/
+*.tar.xz
+*.tar.gz
+*.zip
+*.exe
+*.msi
+
+# --- Runtime output ---
+Logs/
+*.log
+Cache/
+
+# --- Editors / tooling ---
+.vscode/
+.idea/
+*.swp
+*~
+.env
+.env.*
