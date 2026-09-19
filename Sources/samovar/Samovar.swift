@@ -7,8 +7,109 @@ struct Samovar: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "samovar",
         abstract: "Play Windows Steam games on macOS.",
-        subcommands: [Setup.self, SteamCommand.self, Games.self, EngineCommand.self, D3DMetalCommand.self]
+        subcommands: [Setup.self, SteamCommand.self, Games.self, Play.self, ProfileCommand.self,
+                      EngineCommand.self, D3DMetalCommand.self]
     )
+}
+
+extension Renderer: ExpressibleByArgument {}
+
+struct Play: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Launch a game and wait for it to exit.")
+
+    @Argument(help: "Steam app id (see `samovar games`).")
+    var appID: Int
+
+    @Option(help: "Renderer for this run only: wined3d, d3dmetal, d3dmetal-<version>, dxmt.")
+    var renderer: Renderer?
+
+    @Flag(help: "Show the Metal performance HUD for this run.")
+    var hud = false
+
+    @Flag(help: "Print the launch plan without starting anything.")
+    var dryRun = false
+
+    func run() async throws {
+        let launcher = GameLauncher(env: try SamovarEnvironment())
+        var profile = launcher.profiles.load(appID)
+        if let renderer { profile.renderer = renderer }
+        if hud { profile.metalHUD = true }
+
+        let plan = try launcher.plan(appID: appID, profile: profile)
+        print("Game:      \(plan.app.name)")
+        print("Exe:       \(plan.executable.path)")
+        print("Args:      \(plan.arguments)")
+        print("Renderer:  \(plan.variant.renderer)")
+        print("Log:       \(plan.log.path)")
+        if dryRun { return }
+
+        print("Waiting for Steam…")
+        let process = try await launcher.launch(plan)
+        print("Running (pid \(process.processIdentifier)). Ctrl-C to stop waiting.")
+        let status: Int32 = await withCheckedContinuation { continuation in
+            if !process.isRunning { continuation.resume(returning: process.terminationStatus); return }
+            process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
+        }
+        print("Exited with \(status)")
+    }
+}
+
+struct ProfileCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "profile",
+        abstract: "Show or change a game's saved settings.",
+        subcommands: [Show.self, Set.self, Options.self]
+    )
+
+    struct Show: AsyncParsableCommand {
+        @Argument var appID: Int
+
+        func run() async throws {
+            let profile = ProfileStore(paths: SamovarPaths()).load(appID)
+            let data = try JSONEncoder().encode(profile)
+            let pretty = try JSONSerialization.data(withJSONObject: JSONSerialization.jsonObject(with: data),
+                                                    options: [.prettyPrinted, .sortedKeys])
+            print(String(decoding: pretty, as: UTF8.self))
+        }
+    }
+
+    struct Set: AsyncParsableCommand {
+        @Argument var appID: Int
+        @Option var renderer: Renderer?
+        @Option(help: "Launch option key from `profile options`.") var launchOption: String?
+        @Option(help: "Executable relative to the install dir (empty string clears).") var executable: String?
+        @Option(help: "Extra arguments.") var arguments: String?
+        @Option(help: "Metal HUD on/off.") var hud: Bool?
+
+        func run() async throws {
+            let store = ProfileStore(paths: SamovarPaths())
+            var profile = store.load(appID)
+            if let renderer { profile.renderer = renderer }
+            if let launchOption { profile.launchOption = launchOption.isEmpty ? nil : launchOption }
+            if let executable { profile.executable = executable.isEmpty ? nil : executable }
+            if let arguments { profile.arguments = arguments }
+            if let hud { profile.metalHUD = hud }
+            try store.save(profile, for: appID)
+            print("Saved profile for \(appID)")
+        }
+    }
+
+    struct Options: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "List the game's launch options from appinfo.")
+
+        @Argument var appID: Int
+
+        func run() async throws {
+            let options = GameLauncher(env: try SamovarEnvironment()).launchOptions(for: appID)
+            if options.isEmpty { print("No launch options (is Steam logged in and the game owned?)") }
+            let preferred = LaunchOption.preferred(options)
+            for option in options {
+                let mark = option == preferred ? "*" : (option.isPlayable ? " " : "-")
+                let os = option.osList.isEmpty ? "any" : option.osList.joined(separator: ",")
+                print("\(mark) [\(option.key)] \(option.executable) \(option.arguments)  (\(option.type ?? "default"), \(os))")
+            }
+        }
+    }
 }
 
 struct Setup: AsyncParsableCommand {

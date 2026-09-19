@@ -83,6 +83,32 @@ public struct SteamClient: Sendable {
         return Self.runningWindowsProcesses().contains { $0.lowercased().hasSuffix(#"\steam\steam.exe"#) }
     }
 
+    /// Whether the most recent logon state in `logs/connection_log.txt` is "Logged On".
+    ///
+    /// Lines look like `[2026-09-19 15:17:39] [Logged On, 1, 0] [U:1:123] ...`. With `since`,
+    /// only state changes logged at or after that time count (the log survives restarts).
+    public func isLoggedOn(since: Date? = nil) -> Bool {
+        let url = steamRoot.appending(path: "logs/connection_log.txt")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        return Self.lastLogonState(in: text, since: since) == true
+    }
+
+    static func lastLogonState(in log: String, since: Date?) -> Bool? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        for line in log.split(separator: "\n").reversed() {
+            guard let stateRange = line.range(of: "[Logged ") else { continue }
+            if let since {
+                guard line.hasPrefix("["), let close = line.firstIndex(of: "]"),
+                      let date = formatter.date(from: String(line[line.index(after: line.startIndex)..<close])),
+                      date >= since else { return nil }
+            }
+            return line[stateRange.upperBound...].hasPrefix("On")
+        }
+        return nil
+    }
+
     /// Command lines of running Wine processes (their argv[0] is the Windows path).
     static func runningWindowsProcesses() -> [String] {
         let output = (try? Self.ps()) ?? ""
