@@ -7,8 +7,78 @@ struct Samovar: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "samovar",
         abstract: "Play Windows Steam games on macOS.",
-        subcommands: [EngineCommand.self, D3DMetalCommand.self]
+        subcommands: [Setup.self, SteamCommand.self, Games.self, EngineCommand.self, D3DMetalCommand.self]
     )
+}
+
+struct Setup: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Install the engine, create the prefix and install Steam.")
+
+    func run() async throws {
+        let env = try await SamovarEnvironment.setup(progress: ProgressReporter().report)
+        print("Prefix: \(env.prefix.url.path)")
+        print("Next: `samovar steam start --show` and log in once.")
+    }
+}
+
+struct SteamCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "steam",
+        abstract: "Control the Windows Steam client.",
+        subcommands: [Start.self, Stop.self, Status.self, Open.self]
+    )
+
+    struct Start: AsyncParsableCommand {
+        @Flag(help: "Show the Steam window instead of starting silently in the tray.")
+        var show = false
+
+        func run() async throws {
+            let env = try SamovarEnvironment()
+            if env.steam.isRunning { print("Steam is already running"); return }
+            try env.steam.start(silent: !show)
+            print("Starting Steam (log: \(env.steam.log.path))")
+        }
+    }
+
+    struct Stop: AsyncParsableCommand {
+        func run() async throws {
+            let env = try SamovarEnvironment()
+            await env.steam.shutdown()
+            print(env.prefix.isServerRunning ? "Prefix still running" : "Stopped")
+        }
+    }
+
+    struct Status: AsyncParsableCommand {
+        func run() async throws {
+            let env = try SamovarEnvironment()
+            print("installed: \(env.steam.isInstalled)")
+            print("wineserver: \(env.prefix.isServerRunning ? "running" : "stopped")")
+            print("steam: \(env.steam.isRunning ? "running" : "stopped")")
+        }
+    }
+
+    struct Open: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Open a steam:// URL, e.g. steam://install/<appid>.")
+
+        @Argument var url: String
+
+        func run() async throws {
+            try SamovarEnvironment().steam.open(url)
+        }
+    }
+}
+
+struct Games: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "List Steam games in the prefix.")
+
+    func run() async throws {
+        let apps = try SamovarEnvironment().steam.library.apps()
+        if apps.isEmpty { print("No games installed yet.") }
+        for app in apps {
+            let size = ByteCountFormatter.string(fromByteCount: app.sizeOnDisk, countStyle: .file)
+            print("\(app.id)\t\(app.isInstalled ? "installed" : "pending  ")\t\(size)\t\(app.name)")
+        }
+    }
 }
 
 struct D3DMetalCommand: AsyncParsableCommand {
